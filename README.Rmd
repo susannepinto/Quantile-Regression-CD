@@ -1,0 +1,403 @@
+---
+title: "Heterogeneous associations of gut microbiota with Crohn’s disease activity"
+authors: "S. Pinto*, E. Benincà, G. Galazzo, D. Jonkers, J. Penders, J. A. Bogaards"
+contact: "s.pinto@lumc.nl"
+date: "2023-04-14"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+R code belonging to the paper: "Heterogeneous associations of gut microbiota with Crohn’s disease activity" by Susanne Pinto, Elisa Benincà, Gianluca Galazzo, Daisy Jonkers, John Penders and Johannes Bogaards.
+
+We investigated the relationship between bacterial relative abundances and disease activity in a longitudinal cohort of CD patients (n = 57) and healthy controls (n = 15). We applied quantile regression, a statistical technique that allows investigation of possible relationships between bacterial relative abundance and Crohn’s disease activity outside the mean response. For this example script we have used 
+
+## Load the packages
+
+Load the packages in R.
+
+```{r Load the packages, echo=TRUE, message=FALSE}
+library( tidyverse )
+library( here )
+library( lqmm )
+library( nlme )
+library( sjPlot )
+```
+
+# The data
+
+The data need to be in a long dataframe format. Here an example dataset for a single family is given. Prior to the analyses, relative abundances were multiplied with 1000 and log-transformed with the natural log function assuming a lower detection limit of 100 reads (which is 1/4th of the lowest measurable value in the real dataset). Also the age variable was transformed (centered around mean age) else you will run into convergence errors in the model.
+
+```{r The data, echo=TRUE, message=FALSE}
+IBD.data.Family <- data.frame( individual = c( do.call( paste0, expand.grid( c( 'HC' ), 1:15 )),
+                                               do.call( paste0, expand.grid( c( 'IBD' ), 1:57 )),
+                                               do.call( paste0, expand.grid( c( 'HC' ), 1:15 )),
+                                               do.call( paste0, expand.grid( c( 'IBD' ), 1:57 ))),
+                               visit = c( rep( 1, 72 ), rep( 2, 72 )),
+                               Group_01 <- c( rep( 0, 15 ), rep( 1, 35 ), rep( 2, 22 ),
+                                             rep( 0, 15 ), rep( 1, 35 ), rep( 2, 22 )),
+                               Status_01 <- c( rep( 0, 15 ), rep( 1, 35 ), rep( 1, 22 ),
+                                             rep( 0, 15 ), rep( 1, 35 ), rep( 2, 22 )),
+                               age <- runif( 72, 20, 70 ),
+                               Gender <- rep( sample( c( rep( c( "male", "female" ), 36 ))), 2 ),
+                               Smoking <- rep( sample( c( rep( c( "ex", "never", "current" ), 24 ))), 2 ),
+                               density <- abs( rnorm( 144, mean = 0, sd = 1 )))
+
+colnames( IBD.data.Family ) <- c( "individual", "visit", "Group_01", "Status_01", "age", "Gender", "Smoking", "density" )
+IBD.data.Family$visit <- as.factor( IBD.data.Family$visit )
+IBD.data.Family$Group_01 <- as.factor( IBD.data.Family$Group_01 )
+IBD.data.Family$Status_01 <- as.factor( IBD.data.Family$Status_01 )
+
+# Transform age
+mean.age <- IBD.data.Family$age %>% mean()
+IBD.data.Family$age2 <- as.numeric( IBD.data.Family$age - mean.age )
+
+# Transform density
+IBD.data.Family$density.1000 <- IBD.data.Family$density * 1000
+IBD.data.Family$density.log1000 <- ifelse( IBD.data.Family$density.1000 > 0,
+                              log( IBD.data.Family$density.1000 ), log( 100 ))
+
+str(IBD.data.Family)
+```
+
+
+# The smallest model
+
+For the first model, we investigated whether the relative abundances of the bacterial families could be explained by the group to which each individual belongs (i.e., healthy control (HC), remission-remission (RR), or remission-exacerbation (RE)). We added the interaction with visit number, to allow for different temporal changes in bacterial relative abundance over time between healthy controls, CD patients who experienced an exacerbation at the second visit, and those who remained in remission. 
+
+The models contain two timepoints per individual. Therefore, we used a random intercept per patient as well as a random effect for the variable ‘visit number’, because temporal changes in bacterial family’s relative abundance may differ within patients, even when accounting for the fixed effect of disease trajectory (e.g., experiencing an exacerbation at the second visit).
+
+```{r The smallest model, echo=TRUE, message=FALSE}
+# The minimal model
+# Model selection will only be run on the 50% quantile
+fit.model1 <- lqmm( density.log1000 ~  Group_01 * visit, random = ~visit, 
+                    # group = individual, because two time points
+                    group = individual, tau = 0.5, covariance = "pdSymm",
+                    data = IBD.data.Family, na.action = na.omit,
+                    control = list( verbose = FALSE, max_iter = 1000, LP_tol_ll = 1e-04 ))
+fit.model1
+sum.fit.model1 <- summary( fit.model1 )
+sum.fit.model1
+```
+
+# Model selection
+
+Variable selection was performed by running all possible models and then selecting the model with the lowest Bayesian Information Criterion (BIC) in the 50% quantile. 
+
+```{r The model selection procedure}
+# Covariates for selection procedure (Gender, smoking and transformed age)
+vars = c( "Gender", "Smoking" ,"age2")
+
+# Create a NULL vector called model so we have something to add our layers to
+model.group = NULL
+# First add the minimal model without covariates
+model.group[[1]] <- fit.model1
+
+for( i in 1:length( vars )) {
+  # The combn function will run every different combination of variables and then run the model
+  # Below function makes every possible combination of the variables
+  xx = combn( vars, i )
+  for( j in 1:dim( xx )[2] ){
+    fla = paste( "density.log1000 ~  Group_01 * visit +", paste( xx[ 1:dim( xx )[ 1 ], j ], collapse = "+" ))
+    model.group[[ length( model.group ) + 1 ]] = lqmm( as.formula( fla ),
+                                                       random = ~visit, group = individual, tau = 0.5, 
+                                                       covariance = "pdSymm", data = IBD.data.Family, na.action = na.omit,
+                                                       control = list( verbose = FALSE, max_iter = 1000, LP_tol_ll = 1e-04 ))
+    # print( j )
+  }
+  # print( i )
+}
+
+# Make a list of all AICs and BICs
+AICs = NULL
+BICs = NULL
+for(k in 1:length( model.group )){
+  AICs[[k]] = AIC( model.group[[k]] ) 
+  BICs[[k]] = BIC( model.group[[k]] ) 
+}
+
+AICs <- AICs %>% unlist()
+AICs
+# See which model was chosen based on the lowest AIC
+AIC <- which( AICs == min( AICs ))
+AIC
+
+BICs <- BICs %>% unlist()
+BICs
+# See which model was chosen based on the lowest AIC
+BIC <- which( BICs == min( BICs ))
+BIC
+
+# We use the model with the lowest AIC
+selected.model.group <- model.group[[ BIC ]] 
+selected.model.group
+```
+
+# The selected model
+
+```{r The correct model, echo=TRUE, message=FALSE}
+# run the model with for more quantiles
+qs <- seq(0.1, 0.9, by = 0.1) # seq(0.05, 0.95, by = 0.05)
+
+# run the model with the selected covariates (if present)
+fit.model1.2 <- lqmm( density.log1000 ~  Group_01 * visit, random = ~visit, 
+                      # group = individual, because two time points
+                      group = individual, tau = qs, covariance = "pdSymm",
+                      data = IBD.data.Family, na.action = na.omit,
+                      control = list( verbose = FALSE, max_iter = 1000, LP_tol_ll = 1e-04 ))
+fit.model1.2
+sum.fit.model1.2 <- summary( fit.model1.2 )
+sum.fit.model1.2 
+```
+
+# Run the model 10 times
+
+We run the selected model 10 times and use the median values, because the p-values slightly change every time. The lqmm package uses the optimization algorithm "Broyden-Fletcher-Goldfarb-Shanno" (BFGS) to estimate the parameters of the linear quantile mixed model. The BFGS algorithm is an iterative method that relies on an initial starting point and a set of convergence criteria to estimate the parameters.
+
+Because the BFGS algorithm is an iterative method, the estimates obtained can depend on the starting values and the convergence criteria used. If the starting values are very different, or if the convergence criteria are not tight enough, then the algorithm may converge to different estimates on different runs.
+
+```{r Run the model 10 times, echo=TRUE, message=FALSE}
+allsumms.model1 = NULL
+for(l in 1:10){
+  allsumms.model1[[l]] = summary( fit.model1.2 )
+  print(l)
+}
+
+# Subtract the table with the results
+all.ttables.model1 = NULL
+for(m in 1:length(allsumms.model1)){
+  all.ttables.model1[[m]] = allsumms.model1[[m]][["tTable"]]
+  #print(m)
+}
+
+# Subtract the values per quantile
+all.values.model1 = NULL
+for(n in 1:length(all.ttables.model1)){
+  all.values.model1[["0.1"]][[n]] = all.ttables.model1[[n]][["0.1"]]
+  all.values.model1[["0.2"]][[n]] = all.ttables.model1[[n]][["0.2"]]
+  all.values.model1[["0.3"]][[n]] = all.ttables.model1[[n]][["0.3"]]
+  all.values.model1[["0.4"]][[n]] = all.ttables.model1[[n]][["0.4"]]
+  all.values.model1[["0.5"]][[n]] = all.ttables.model1[[n]][["0.5"]]
+  all.values.model1[["0.6"]][[n]] = all.ttables.model1[[n]][["0.6"]]
+  all.values.model1[["0.7"]][[n]] = all.ttables.model1[[n]][["0.7"]]
+  all.values.model1[["0.8"]][[n]] = all.ttables.model1[[n]][["0.8"]]
+  all.values.model1[["0.9"]][[n]] = all.ttables.model1[[n]][["0.9"]]
+  #print(n)
+}
+
+# Make a list with the different results
+nrows <- all.values.model1[["0.1"]][[1]] %>% nrow()
+median.table.model1 = list()
+
+for( p in 1:nrows ){
+  median.table.model1[["0.1"]][[p]] <- list()
+  median.table.model1[["0.2"]][[p]] <- list()
+  median.table.model1[["0.3"]][[p]] <- list()
+  median.table.model1[["0.4"]][[p]] <- list()
+  median.table.model1[["0.5"]][[p]] <- list()
+  median.table.model1[["0.6"]][[p]] <- list()
+  median.table.model1[["0.7"]][[p]] <- list()
+  median.table.model1[["0.8"]][[p]] <- list()
+  median.table.model1[["0.9"]][[p]] <- list()
+  
+  for(o in 1:length(all.ttables.model1)){
+    median.table.model1[["0.1"]][[p]][[o]] = all.values.model1[["0.1"]][[o]][p,] %>% as.matrix() 
+    median.table.model1[["0.2"]][[p]][[o]] = all.values.model1[["0.2"]][[o]][p,] %>% as.matrix() 
+    median.table.model1[["0.3"]][[p]][[o]] = all.values.model1[["0.3"]][[o]][p,] %>% as.matrix()
+    median.table.model1[["0.4"]][[p]][[o]] = all.values.model1[["0.4"]][[o]][p,] %>% as.matrix() 
+    median.table.model1[["0.5"]][[p]][[o]] = all.values.model1[["0.5"]][[o]][p,] %>% as.matrix()
+    median.table.model1[["0.6"]][[p]][[o]] = all.values.model1[["0.6"]][[o]][p,] %>% as.matrix()
+    median.table.model1[["0.7"]][[p]][[o]] = all.values.model1[["0.7"]][[o]][p,] %>% as.matrix()
+    median.table.model1[["0.8"]][[p]][[o]] = all.values.model1[["0.8"]][[o]][p,] %>% as.matrix()
+    median.table.model1[["0.9"]][[p]][[o]] = all.values.model1[["0.9"]][[o]][p,] %>% as.matrix()
+  } 
+}
+
+# Get the median values per quantile
+median.values.model1 = NULL
+for( q in 1:nrows ){
+  median.values.model1[["0.1"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.1"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.2"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.2"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.3"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.3"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.4"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.4"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.5"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.5"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.6"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.6"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.7"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.7"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.8"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.8"]][[q]]), 1, median, na.rm=T)
+  median.values.model1[["0.9"]][[q]] <- apply(do.call(cbind, median.table.model1[["0.9"]][[q]]), 1, median, na.rm=T)
+}
+
+# Make new results tables with the median values
+rownames.results <- all.values.model1[["0.1"]][[1]] %>% rownames()
+results.model1 = NULL
+results.model1[["0.1"]] <- do.call(rbind, median.values.model1[["0.1"]])
+rownames(results.model1[["0.1"]]) <- rownames.results
+
+results.model1[["0.2"]] <- do.call(rbind, median.values.model1[["0.2"]])
+rownames(results.model1[["0.2"]]) <- rownames.results
+
+results.model1[["0.3"]] <- do.call(rbind, median.values.model1[["0.3"]])
+rownames(results.model1[["0.3"]]) <- rownames.results
+
+results.model1[["0.4"]] <- do.call(rbind, median.values.model1[["0.4"]])
+rownames(results.model1[["0.4"]]) <- rownames.results
+
+results.model1[["0.5"]] <- do.call(rbind, median.values.model1[["0.5"]])
+rownames(results.model1[["0.5"]]) <- rownames.results
+
+results.model1[["0.6"]] <- do.call(rbind, median.values.model1[["0.6"]])
+rownames(results.model1[["0.6"]]) <- rownames.results
+
+results.model1[["0.7"]] <- do.call(rbind, median.values.model1[["0.7"]])
+rownames(results.model1[["0.7"]]) <- rownames.results
+
+results.model1[["0.8"]] <- do.call(rbind, median.values.model1[["0.8"]])
+rownames(results.model1[["0.8"]]) <- rownames.results
+
+results.model1[["0.9"]] <- do.call(rbind, median.values.model1[["0.9"]])
+rownames(results.model1[["0.9"]]) <- rownames.results
+```
+
+
+# Plot p-values model 1
+
+Differences at baseline (visit 1) are visualized in light green (RR) and red (RE), the interaction with visit number (in dark green and orange) displays changes over time. Significant variables are indicated with a closed circle.
+
+```{r Plot p-values}
+fam.name <- "Example family"
+values.model1 <- matrix(ncol = 7, nrow =  0) %>% as.data.frame()
+colnames(values.model1) <- c("Family", "Variable", "Quantile", "Estimate", "lower", "upper", "Pvalue")
+
+for( s in 1:length(results.model1 )){
+  t.table.qs <- results.model1[[s]]
+  values.model1[ nrow(values.model1) + 1 , ] <- NA
+  
+  values.model1[nrow(values.model1), 1] <- fam.name
+  values.model1[nrow(values.model1), 2] <- "RR"
+  values.model1[nrow(values.model1), 3] <- qs[s] * 100
+  values.model1[nrow(values.model1), 4] <- t.table.qs["Group_011",1]
+  values.model1[nrow(values.model1), 5] <- t.table.qs["Group_011",3]
+  values.model1[nrow(values.model1), 6] <- t.table.qs["Group_011",4]
+  values.model1[nrow(values.model1), 7] <- t.table.qs["Group_011",5]
+}
+
+for( s in 1:length(results.model1 )){
+  t.table.qs <- results.model1[[s]]
+  values.model1[ nrow(values.model1) + 1 , ] <- NA
+  
+  values.model1[nrow(values.model1), 1] <- fam.name
+  values.model1[nrow(values.model1), 2] <- "RA"
+  values.model1[nrow(values.model1), 3] <- qs[s] * 100
+  values.model1[nrow(values.model1), 4] <- t.table.qs["Group_012",1]
+  values.model1[nrow(values.model1), 5] <- t.table.qs["Group_012",3]
+  values.model1[nrow(values.model1), 6] <- t.table.qs["Group_012",4]
+  values.model1[nrow(values.model1), 7] <- t.table.qs["Group_012",5]
+}
+
+for( s in 1:length(results.model1 )){
+  t.table.qs <- results.model1[[s]]
+  values.model1[ nrow(values.model1) + 1 , ] <- NA
+  
+  values.model1[nrow(values.model1), 1] <- fam.name
+  values.model1[nrow(values.model1), 2] <- "RR:visit"
+  values.model1[nrow(values.model1), 3] <- qs[s] * 100
+  values.model1[nrow(values.model1), 4] <- t.table.qs["Group_011:visit2",1]
+  values.model1[nrow(values.model1), 5] <- t.table.qs["Group_011:visit2",3]
+  values.model1[nrow(values.model1), 6] <- t.table.qs["Group_011:visit2",4]
+  values.model1[nrow(values.model1), 7] <- t.table.qs["Group_011:visit2",5]
+}
+
+for( s in 1:length(results.model1 )){
+  t.table.qs <- results.model1[[s]]
+  values.model1[ nrow(values.model1) + 1 , ] <- NA
+  
+  values.model1[nrow(values.model1), 1] <- fam.name
+  values.model1[nrow(values.model1), 2] <- "RA:visit"
+  values.model1[nrow(values.model1), 3] <- qs[s] * 100
+  values.model1[nrow(values.model1), 4] <- t.table.qs["Group_012:visit2",1]
+  values.model1[nrow(values.model1), 5] <- t.table.qs["Group_012:visit2",3]
+  values.model1[nrow(values.model1), 6] <- t.table.qs["Group_012:visit2",4]
+  values.model1[nrow(values.model1), 7] <- t.table.qs["Group_012:visit2",5]
+}
+
+values.model1 %>% head()
+
+values.plot.model1 <- ggplot( values.model1, 
+                              aes( x = Quantile, y = Estimate, 
+                                   group = Variable, ymin = lower, ymax = upper)) +  
+  theme_bw() +
+  geom_line( aes( alpha = 0.4), size = 1.2 )+
+  geom_point( aes(shape = Pvalue < 0.05, color = Variable, size = Pvalue < 0.05), size = 8, stroke = 2  ) +
+  scale_shape_manual(name = 'P value < 0.05', values = setNames( c( 19, 1 ), c( T, F ))) +
+  scale_color_manual(values = c("RR" = "Green", "RA" = "Red", 
+                                "RR:visit" = "Dark green", "RA:visit" = "Orange")) +
+  theme( legend.position = "none",
+         axis.text=element_text( size = 12 ),
+         axis.title.x = element_text(size = 14),
+         axis.title.y = element_text(size = 14)#, 
+         #strip.text.x = element_blank()
+  ) + 
+  labs(title = "Effect estimates Group") + 
+  geom_hline( yintercept = 0, linetype = "dashed", color = "Black", size = 1 )   +
+  ggtitle( fam.name )  
+values.plot.model1
+```
+
+# Ordinary linear mixed effect model
+
+We compared our results from the lqmm models with the results obtained from an ordinary linear mixed effect model (with similar variables as used in the lqmm models) by using the lme function from the nlme package (version 3.1).
+
+```{r LMM, echo=TRUE, message=FALSE}
+model1 <- lme( density.log1000 ~ Group_01*visit, random = ~1+visit|individual, data = IBD.data.Family,
+               na.action = na.omit )
+summary( model1 ) 
+```
+
+# Plot models to compare LQMM and LMM
+
+```{r Plot to compare, echo=TRUE, message=FALSE}
+# model using only the first timepoint (so no patients are in exacerbation)
+fit.model1.02 <- lqmm( density.log1000 ~  Group_01 * visit, random = ~visit, 
+                    # group = individual, because two time points
+                    group = individual, tau = 0.2, covariance = "pdSymm",
+                    data = IBD.data.Family, na.action = na.omit,
+                    control = list( verbose = FALSE, max_iter = 1000, LP_tol_ll = 1e-04 ))
+fit.model1.02
+sum.fit.model1.02 <- summary( fit.model1.02 )
+sum.fit.model1.02
+
+# model using only the first timepoint (so no patients are in exacerbation)
+fit.model1.05 <- lqmm( density.log1000 ~  Group_01 * visit, random = ~visit, 
+                    # group = individual, because two time points
+                    group = individual, tau = 0.5, covariance = "pdSymm",
+                    data = IBD.data.Family, na.action = na.omit,
+                    control = list( verbose = FALSE, max_iter = 1000, LP_tol_ll = 1e-04 ))
+fit.model1.05
+sum.fit.model1.05 <- summary( fit.model1.05 )
+sum.fit.model1.05
+
+# model using only the first timepoint (so no patients are in exacerbation)
+fit.model1.08 <- lqmm( density.log1000 ~  Group_01 * visit, random = ~visit, 
+                    # group = individual, because two time points
+                    group = individual, tau = 0.8, covariance = "pdSymm",
+                    data = IBD.data.Family, na.action = na.omit,
+                    control = list( verbose = FALSE, max_iter = 1000, LP_tol_ll = 1e-04 ))
+fit.model1.08
+sum.fit.model1.08 <- summary( fit.model1.08 )
+sum.fit.model1.08
+
+# Model 1: Normal regression
+# Model 1.02: Quantile regression, quantile 20%
+# Model 1.05: Quantile regression, quantile 50%
+# Model 1.08: Quantile regression, quantile 80%
+
+plot_models(fit.model1.02, model1, fit.model1.05 ,fit.model1.08, show.p = TRUE, title = paste(fam.name), 
+            vline.color = "black", line.size = 1.5, dot.size = 5, spacing = 0.7) + 
+  theme_bw() +  
+  theme(axis.text = element_text(size=14), legend.position="none") + 
+  scale_color_manual(values=c( "darkblue", "Blue", "Red", "#6699FF" ))
+```
